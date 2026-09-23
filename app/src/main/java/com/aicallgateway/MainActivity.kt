@@ -41,27 +41,41 @@ class MainActivity : AppCompatActivity() {
         }, PhoneStateListener.LISTEN_CALL_STATE)
 
         findViewById<Button>(R.id.call).setOnClickListener {
-            val n = number.text.toString().trim()
-            if (!validNumber(n)) { status.text = "Enter a valid non-emergency number"; return@setOnClickListener }
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-                status.text = "Call permission required"; return@setOnClickListener
-            }
-            try {
-                val extras = Bundle().apply { putBoolean(TelecomManager.EXTRA_START_CALL_WITH_SPEAKERPHONE, true) }
-                getSystemService(TelecomManager::class.java).placeCall(Uri.parse("tel:$n"), extras)
-                status.text = "Call requested"
-            } catch (e: Exception) { status.text = "Call failed: ${e.message}" }
+            val result = placeSimCall(number.text.toString().trim())
+            status.text = result.message
         }
 
         findViewById<Button>(R.id.hangup).setOnClickListener {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS) != PackageManager.PERMISSION_GRANTED) {
-                status.text = "Phone-control permission required"; return@setOnClickListener
-            }
-            try {
-                @Suppress("DEPRECATION")
-                val ended = getSystemService(TelecomManager::class.java).endCall()
-                status.text = if (ended) "Call ended" else "No active call could be ended"
-            } catch (e: Exception) { status.text = "Hang-up failed: ${e.message}" }
+            status.text = endSimCall().message
+        }
+    }
+
+    data class CallResult(val success: Boolean, val message: String)
+
+    private fun placeSimCall(number: String): CallResult {
+        if (!validNumber(number)) return CallResult(false, "Enter a valid non-emergency number")
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            return CallResult(false, "Call permission required")
+        }
+        return try {
+            val extras = Bundle().apply { putBoolean(TelecomManager.EXTRA_START_CALL_WITH_SPEAKERPHONE, true) }
+            getSystemService(TelecomManager::class.java).placeCall(Uri.parse("tel:$number"), extras)
+            CallResult(true, "Call requested")
+        } catch (e: Exception) {
+            CallResult(false, "Call failed: ${e.message}")
+        }
+    }
+
+    private fun endSimCall(): CallResult {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS) != PackageManager.PERMISSION_GRANTED) {
+            return CallResult(false, "Phone-control permission required")
+        }
+        return try {
+            @Suppress("DEPRECATION")
+            val ended = getSystemService(TelecomManager::class.java).endCall()
+            CallResult(ended, if (ended) "Call ended" else "No active call could be ended")
+        } catch (e: Exception) {
+            CallResult(false, "Hang-up failed: ${e.message}")
         }
     }
 
