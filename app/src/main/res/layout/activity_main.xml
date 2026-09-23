@@ -9,6 +9,8 @@
     <EditText android:id="@+id/number" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="+44…" android:inputType="phone" android:layout_marginTop="24dp"/>
     <Button android:id="@+id/call" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Make SIM Call" android:layout_marginTop="12dp"/>
     <Button android:id="@+id/hangup" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="End Call" android:layout_marginTop="8dp"/>
+    <EditText android:id="@+id/pairingToken" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Pairing credential" android:inputType="textPassword" android:layout_marginTop="16dp"/>
+    <Button android:id="@+id/pairGateway" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Pair / Test Gateway" android:layout_marginTop="8dp"/>
     <TextView android:id="@+id/remoteState" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Remote gateway: not connected" android:layout_marginTop="12dp"/>
     <TextView android:id="@+id/callState" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Call state: idle" android:layout_marginTop="16dp"/>
 </LinearLayout>
