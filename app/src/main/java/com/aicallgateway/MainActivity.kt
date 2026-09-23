@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var polling = false
     @Volatile private var activeRequestId: String? = null
     @Volatile private var sawOffHook = false
+    @Volatile private var lastCallState = TelephonyManager.CALL_STATE_IDLE
     @Volatile private var sessionApproved = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,6 +59,7 @@ class MainActivity : AppCompatActivity() {
         @Suppress("DEPRECATION")
         (getSystemService(TELEPHONY_SERVICE) as TelephonyManager).listen(object : PhoneStateListener() {
             override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                lastCallState = state
                 val stateName = when (state) {
                     TelephonyManager.CALL_STATE_RINGING -> "ringing"
                     TelephonyManager.CALL_STATE_OFFHOOK -> "active"
@@ -140,9 +142,11 @@ class MainActivity : AppCompatActivity() {
                     if (validNumber(phone)) {
                         if (sessionApproved) {
                             activeRequestId = id
-                            sawOffHook = false
+                            sawOffHook = lastCallState == TelephonyManager.CALL_STATE_OFFHOOK
                             val result = placeSimCall(phone)
+                            if (!result.success) { activeRequestId = null; sawOffHook = false }
                             gatewayAck(token, id, if (result.success) "claimed" else "failed", "request", if (result.success) null else result.message)
+                            if (result.success) sendEvent("call_requested", if (sawOffHook) "active" else "dialing", id)
                             runOnUiThread { remoteState.text = if (result.success) "Remote gateway: call requested" else "Remote gateway: call failed" }
                         } else {
                             runOnUiThread { remoteState.text = "Remote gateway: session approval required"; showCallApproval(phone, id) }
@@ -214,8 +218,10 @@ class MainActivity : AppCompatActivity() {
         numberView.setText(phone)
         val commandId = intent.getStringExtra(EXTRA_COMMAND_ID)
         activeRequestId = commandId
-        sawOffHook = false
+        sawOffHook = lastCallState == TelephonyManager.CALL_STATE_OFFHOOK
         val result = executeApprovedCommand("call", phone)
+        if (!result.success) { activeRequestId = null; sawOffHook = false }
+        else sendEvent("call_requested", if (sawOffHook) "active" else "dialing", commandId)
         status.text = result.message
         val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null)
         if (!commandId.isNullOrBlank() && !token.isNullOrBlank()) io.execute {
