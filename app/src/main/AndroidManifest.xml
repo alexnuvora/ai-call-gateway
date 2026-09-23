@@ -4,7 +4,8 @@
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.INTERNET"/>
-    <application android:theme="@style/Theme.AICallGateway" android:label="AI Call Gateway" android:allowBackup="false">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <application android:usesCleartextTraffic="false" android:theme="@style/Theme.AICallGateway" android:label="AI Call Gateway" android:allowBackup="false">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
         </activity>
