@@ -4,6 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.content.Intent
+import android.app.PendingIntent
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import androidx.core.app.NotificationCompat
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
@@ -23,8 +28,15 @@ class MainActivity : AppCompatActivity() {
         val status = findViewById<TextView>(R.id.status)
         stateView = findViewById(R.id.callState)
         val number = findViewById<EditText>(R.id.number)
+        handleApprovedIntent(intent, number, status)
+        createApprovalChannel()
 
-        val permissions = arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS)
+        val permissions = buildList {
+            add(Manifest.permission.CALL_PHONE)
+            add(Manifest.permission.READ_PHONE_STATE)
+            add(Manifest.permission.ANSWER_PHONE_CALLS)
+            if (android.os.Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+        }.toTypedArray()
         if (permissions.any { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
             ActivityCompat.requestPermissions(this, permissions, requestCode)
         }
@@ -47,6 +59,54 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.hangup).setOnClickListener {
             status.text = endSimCall().message
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleApprovedIntent(intent, findViewById(R.id.number), findViewById(R.id.status))
+    }
+
+    private fun handleApprovedIntent(intent: Intent, numberView: EditText, status: TextView) {
+        if (intent.action != ACTION_APPROVE_CALL) return
+        val phone = intent.getStringExtra(EXTRA_PHONE).orEmpty()
+        numberView.setText(phone)
+        status.text = executeApprovedCommand("call", phone).message
+        intent.action = null
+    }
+
+    private fun createApprovalChannel() {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(
+            APPROVAL_CHANNEL, "Approved call requests", NotificationManager.IMPORTANCE_HIGH
+        ))
+    }
+
+    // The network consumer will call this after receiving a server-side approved request.
+    // It never dials from the network callback: the user must tap the notification action.
+    private fun showCallApproval(phone: String) {
+        if (!validNumber(phone)) return
+        val approve = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_APPROVE_CALL
+            putExtra(EXTRA_PHONE, phone)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pending = PendingIntent.getActivity(
+            this, phone.hashCode(), approve,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, APPROVAL_CHANNEL)
+            .setSmallIcon(android.R.drawable.sym_action_call)
+            .setContentTitle("Vorlen call request")
+            .setContentText("Call $phone")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .addAction(android.R.drawable.sym_action_call, "Approve & call", pending)
+            .build()
+        if (android.os.Build.VERSION.SDK_INT < 33 ||
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            getSystemService(NotificationManager::class.java).notify(phone.hashCode(), notification)
         }
     }
 
@@ -91,6 +151,12 @@ class MainActivity : AppCompatActivity() {
             "hangup" -> endSimCall()
             else -> CallResult(false, "Unsupported command")
         }
+    }
+
+    companion object {
+        private const val ACTION_APPROVE_CALL = "com.aicallgateway.APPROVE_CALL"
+        private const val EXTRA_PHONE = "phone_number"
+        private const val APPROVAL_CHANNEL = "approved_calls"
     }
 
     private fun validNumber(n: String): Boolean {
