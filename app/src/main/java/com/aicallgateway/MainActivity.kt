@@ -25,7 +25,8 @@ import androidx.core.app.ActivityCompat
 class MainActivity : AppCompatActivity() {
     private val requestCode = 100
     private lateinit var stateView: TextView
-    private val io = Executors.newSingleThreadExecutor()
+    private val pollingIo = Executors.newSingleThreadExecutor()
+    private val outboundIo = Executors.newSingleThreadExecutor()
     @Volatile private var polling = false
     @Volatile private var activeRequestId: String? = null
     @Volatile private var sawOffHook = false
@@ -109,13 +110,14 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         sessionApproved = false
         polling = false
-        io.shutdownNow()
+        pollingIo.shutdownNow()
+        outboundIo.shutdownNow()
         super.onDestroy()
     }
 
     private fun testGateway(token: String, remoteState: TextView) {
         remoteState.text = "Remote gateway: connecting..."
-        io.execute {
+        pollingIo.execute {
             try {
                 val response = gatewayGet(token)
                 runOnUiThread { remoteState.text = "Remote gateway: connected" }
@@ -186,8 +188,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendEvent(eventType: String, callState: String, requestId: String?) {
         val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null) ?: return
-        if (io.isShutdown) return
-        io.execute {
+        if (outboundIo.isShutdown) return
+        outboundIo.execute {
             try {
                 val c = URL(GATEWAY_URL).openConnection() as HttpURLConnection
                 c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 10000; c.readTimeout = 10000
@@ -202,8 +204,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun completeActiveRequest(requestId: String) {
         val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null) ?: return
-        if (io.isShutdown) return
-        io.execute { try { gatewayAck(token, requestId, "completed") } catch (_: Exception) {} }
+        if (outboundIo.isShutdown) return
+        outboundIo.execute { try { gatewayAck(token, requestId, "completed") } catch (_: Exception) {} }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -224,7 +226,7 @@ class MainActivity : AppCompatActivity() {
         else sendEvent("call_requested", if (sawOffHook) "active" else "dialing", commandId)
         status.text = result.message
         val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null)
-        if (!commandId.isNullOrBlank() && !token.isNullOrBlank()) io.execute {
+        if (!commandId.isNullOrBlank() && !token.isNullOrBlank()) outboundIo.execute {
             try { gatewayAck(token, commandId, if (result.success) "claimed" else "failed") } catch (_: Exception) {}
         }
         intent.action = null
