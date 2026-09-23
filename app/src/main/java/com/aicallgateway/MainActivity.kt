@@ -15,12 +15,18 @@ import android.telephony.TelephonyManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
+import java.util.concurrent.Executors
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 
 class MainActivity : AppCompatActivity() {
     private val requestCode = 100
     private lateinit var stateView: TextView
+    private val io = Executors.newSingleThreadExecutor()
+    @Volatile private var polling = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,6 +34,10 @@ class MainActivity : AppCompatActivity() {
         val status = findViewById<TextView>(R.id.status)
         stateView = findViewById(R.id.callState)
         val number = findViewById<EditText>(R.id.number)
+        val remoteState = findViewById<TextView>(R.id.remoteState)
+        val pairingToken = findViewById<EditText>(R.id.pairingToken)
+        val prefs = getSharedPreferences("gateway", MODE_PRIVATE)
+        pairingToken.setText(prefs.getString("device_token", ""))
         handleApprovedIntent(intent, number, status)
         createApprovalChannel()
 
@@ -52,6 +62,13 @@ class MainActivity : AppCompatActivity() {
             }
         }, PhoneStateListener.LISTEN_CALL_STATE)
 
+        findViewById<Button>(R.id.pairGateway).setOnClickListener {
+            val token = pairingToken.text.toString().trim()
+            if (token.length < 24) remoteState.text = "Remote gateway: enter pairing credential"
+            else { prefs.edit().putString("device_token", token).apply(); testGateway(token, remoteState) }
+        }
+        prefs.getString("device_token", null)?.takeIf { it.length >= 24 }?.let { testGateway(it, remoteState) }
+
         findViewById<Button>(R.id.call).setOnClickListener {
             val result = placeSimCall(number.text.toString().trim())
             status.text = result.message
@@ -60,6 +77,69 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.hangup).setOnClickListener {
             status.text = endSimCall().message
         }
+    }
+
+    override fun onDestroy() {
+        polling = false
+        io.shutdownNow()
+        super.onDestroy()
+    }
+
+    private fun testGateway(token: String, remoteState: TextView) {
+        remoteState.text = "Remote gateway: connecting..."
+        io.execute {
+            try {
+                val response = gatewayGet(token)
+                runOnUiThread { remoteState.text = "Remote gateway: connected" }
+                if (!polling) { polling = true; pollGateway(token, remoteState, response) }
+            } catch (e: Exception) {
+                runOnUiThread { remoteState.text = "Remote gateway: " + (e.message ?: "connection failed") }
+            }
+        }
+    }
+
+    private fun pollGateway(token: String, remoteState: TextView, first: JSONObject? = null) {
+        var current = first
+        while (polling && !Thread.currentThread().isInterrupted) {
+            try {
+                val body = current ?: gatewayGet(token); current = null
+                val command = body.optJSONObject("command")
+                if (command != null && command.optString("action") == "call") {
+                    val id = command.optString("id"); val phone = command.optString("phone_number")
+                    if (validNumber(phone)) {
+                        gatewayAck(token, id, "claimed")
+                        runOnUiThread { remoteState.text = "Remote gateway: approval requested"; showCallApproval(phone, id) }
+                    }
+                } else runOnUiThread { remoteState.text = "Remote gateway: connected" }
+                Thread.sleep(5000)
+            } catch (e: InterruptedException) { Thread.currentThread().interrupt(); break }
+            catch (e: Exception) {
+                runOnUiThread { remoteState.text = "Remote gateway: retrying" }
+                try { Thread.sleep(10000) } catch (_: InterruptedException) { break }
+            }
+        }
+    }
+
+    private fun gatewayGet(token: String): JSONObject {
+        val c = URL(GATEWAY_URL).openConnection() as HttpURLConnection
+        c.requestMethod = "GET"; c.connectTimeout = 10000; c.readTimeout = 10000
+        c.setRequestProperty("x-device-code", DEVICE_CODE); c.setRequestProperty("x-device-token", token)
+        val code = c.responseCode
+        val body = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().use { it.readText() }
+        c.disconnect()
+        if (code !in 200..299) throw IllegalStateException("HTTP " + code)
+        return JSONObject(body)
+    }
+
+    private fun gatewayAck(token: String, id: String, state: String) {
+        val c = URL(GATEWAY_URL).openConnection() as HttpURLConnection
+        c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 10000; c.readTimeout = 10000
+        c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("x-device-code", DEVICE_CODE); c.setRequestProperty("x-device-token", token)
+        c.outputStream.use { it.write(JSONObject().put("id", id).put("status", state).toString().toByteArray()) }
+        val code = c.responseCode
+        if (code in 200..299) c.inputStream.close() else c.errorStream?.close()
+        c.disconnect()
+        if (code !in 200..299) throw IllegalStateException("Ack HTTP " + code)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -72,7 +152,13 @@ class MainActivity : AppCompatActivity() {
         if (intent.action != ACTION_APPROVE_CALL) return
         val phone = intent.getStringExtra(EXTRA_PHONE).orEmpty()
         numberView.setText(phone)
-        status.text = executeApprovedCommand("call", phone).message
+        val result = executeApprovedCommand("call", phone)
+        status.text = result.message
+        val commandId = intent.getStringExtra(EXTRA_COMMAND_ID)
+        val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null)
+        if (!commandId.isNullOrBlank() && !token.isNullOrBlank()) io.execute {
+            try { gatewayAck(token, commandId, if (result.success) "completed" else "failed") } catch (_: Exception) {}
+        }
         intent.action = null
     }
 
@@ -85,11 +171,12 @@ class MainActivity : AppCompatActivity() {
 
     // The network consumer will call this after receiving a server-side approved request.
     // It never dials from the network callback: the user must tap the notification action.
-    private fun showCallApproval(phone: String) {
+    private fun showCallApproval(phone: String, commandId: String) {
         if (!validNumber(phone)) return
         val approve = Intent(this, MainActivity::class.java).apply {
             action = ACTION_APPROVE_CALL
             putExtra(EXTRA_PHONE, phone)
+            putExtra(EXTRA_COMMAND_ID, commandId)
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pending = PendingIntent.getActivity(
@@ -156,6 +243,9 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val ACTION_APPROVE_CALL = "com.aicallgateway.APPROVE_CALL"
         private const val EXTRA_PHONE = "phone_number"
+        private const val EXTRA_COMMAND_ID = "command_id"
+        private const val DEVICE_CODE = "s24fe-primary"
+        private const val GATEWAY_URL = "https://mzkaodoruhklzluikagy.supabase.co/functions/v1/vorlen-call-device"
         private const val APPROVAL_CHANNEL = "approved_calls"
     }
 
