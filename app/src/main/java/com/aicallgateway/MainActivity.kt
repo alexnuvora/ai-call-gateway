@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var polling = false
     @Volatile private var activeRequestId: String? = null
     @Volatile private var sawOffHook = false
+    @Volatile private var sessionApproved = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,6 +39,7 @@ class MainActivity : AppCompatActivity() {
         val number = findViewById<EditText>(R.id.number)
         val remoteState = findViewById<TextView>(R.id.remoteState)
         val pairingToken = findViewById<EditText>(R.id.pairingToken)
+        val sessionState = findViewById<TextView>(R.id.sessionState)
         val prefs = getSharedPreferences("gateway", MODE_PRIVATE)
         pairingToken.setText(prefs.getString("device_token", ""))
         handleApprovedIntent(intent, number, status)
@@ -79,6 +81,12 @@ class MainActivity : AppCompatActivity() {
             }
         }, PhoneStateListener.LISTEN_CALL_STATE)
 
+        findViewById<Button>(R.id.approveSession).setOnClickListener {
+            sessionApproved = !sessionApproved
+            sessionState.text = if (sessionApproved) "Calling session: APPROVED" else "Calling session: not approved"
+            findViewById<Button>(R.id.approveSession).text = if (sessionApproved) "End Calling Session" else "Approve Calling Session"
+        }
+
         findViewById<Button>(R.id.pairGateway).setOnClickListener {
             val token = pairingToken.text.toString().trim()
             if (token.length < 24) remoteState.text = "Remote gateway: enter pairing credential"
@@ -97,6 +105,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        sessionApproved = false
         polling = false
         io.shutdownNow()
         super.onDestroy()
@@ -129,8 +138,15 @@ class MainActivity : AppCompatActivity() {
                 } else if (command != null && command.optString("action") == "call") {
                     val id = command.optString("id"); val phone = command.optString("phone_number")
                     if (validNumber(phone)) {
-                        gatewayAck(token, id, "claimed")
-                        runOnUiThread { remoteState.text = "Remote gateway: approval requested"; showCallApproval(phone, id) }
+                        if (sessionApproved) {
+                            activeRequestId = id
+                            sawOffHook = false
+                            val result = placeSimCall(phone)
+                            gatewayAck(token, id, if (result.success) "claimed" else "failed", "request", if (result.success) null else result.message)
+                            runOnUiThread { remoteState.text = if (result.success) "Remote gateway: call requested" else "Remote gateway: call failed" }
+                        } else {
+                            runOnUiThread { remoteState.text = "Remote gateway: session approval required"; showCallApproval(phone, id) }
+                        }
                     }
                 } else runOnUiThread { remoteState.text = "Remote gateway: connected" }
                 Thread.sleep(5000)
