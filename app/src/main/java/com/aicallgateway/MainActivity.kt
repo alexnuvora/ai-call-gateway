@@ -27,6 +27,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var stateView: TextView
     private val io = Executors.newSingleThreadExecutor()
     @Volatile private var polling = false
+    @Volatile private var activeRequestId: String? = null
+    @Volatile private var sawOffHook = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +56,21 @@ class MainActivity : AppCompatActivity() {
         @Suppress("DEPRECATION")
         (getSystemService(TELEPHONY_SERVICE) as TelephonyManager).listen(object : PhoneStateListener() {
             override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                val stateName = when (state) {
+                    TelephonyManager.CALL_STATE_RINGING -> "ringing"
+                    TelephonyManager.CALL_STATE_OFFHOOK -> "active"
+                    else -> "idle"
+                }
+                if (state == TelephonyManager.CALL_STATE_OFFHOOK) sawOffHook = true
+                val requestId = activeRequestId
+                if (requestId != null) {
+                    sendEvent("call_state", stateName, requestId)
+                    if (state == TelephonyManager.CALL_STATE_IDLE && sawOffHook) {
+                        completeActiveRequest(requestId)
+                        activeRequestId = null
+                        sawOffHook = false
+                    }
+                }
                 stateView.text = "Call state: " + when (state) {
                     TelephonyManager.CALL_STATE_RINGING -> "ringing"
                     TelephonyManager.CALL_STATE_OFFHOOK -> "active"
@@ -104,7 +121,12 @@ class MainActivity : AppCompatActivity() {
             try {
                 val body = current ?: gatewayGet(token); current = null
                 val command = body.optJSONObject("command")
-                if (command != null && command.optString("action") == "call") {
+                if (command != null && command.optString("action") == "hangup") {
+                    val id = command.optString("id")
+                    val result = endSimCall()
+                    gatewayAck(token, id, if (result.success) "completed" else "failed", "command", if (result.success) null else result.message)
+                    runOnUiThread { remoteState.text = if (result.success) "Remote gateway: call ended" else "Remote gateway: hang-up failed" }
+                } else if (command != null && command.optString("action") == "call") {
                     val id = command.optString("id"); val phone = command.optString("phone_number")
                     if (validNumber(phone)) {
                         gatewayAck(token, id, "claimed")
@@ -131,15 +153,37 @@ class MainActivity : AppCompatActivity() {
         return JSONObject(body)
     }
 
-    private fun gatewayAck(token: String, id: String, state: String) {
+    private fun gatewayAck(token: String, id: String, state: String, kind: String = "request", error: String? = null) {
         val c = URL(GATEWAY_URL).openConnection() as HttpURLConnection
         c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 10000; c.readTimeout = 10000
         c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("x-device-code", DEVICE_CODE); c.setRequestProperty("x-device-token", token)
-        c.outputStream.use { it.write(JSONObject().put("id", id).put("status", state).toString().toByteArray()) }
+        c.outputStream.use { it.write(JSONObject().put("id", id).put("status", state).put("kind", kind).put("error", error).toString().toByteArray()) }
         val code = c.responseCode
         if (code in 200..299) c.inputStream.close() else c.errorStream?.close()
         c.disconnect()
         if (code !in 200..299) throw IllegalStateException("Ack HTTP " + code)
+    }
+
+    private fun sendEvent(eventType: String, callState: String, requestId: String?) {
+        val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null) ?: return
+        if (io.isShutdown) return
+        io.execute {
+            try {
+                val c = URL(GATEWAY_URL).openConnection() as HttpURLConnection
+                c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 10000; c.readTimeout = 10000
+                c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("x-device-code", DEVICE_CODE); c.setRequestProperty("x-device-token", token)
+                val b = JSONObject().put("type","event").put("event_type",eventType).put("call_state",callState).put("request_id",requestId)
+                c.outputStream.use { it.write(b.toString().toByteArray()) }
+                if (c.responseCode in 200..299) c.inputStream.close() else c.errorStream?.close()
+                c.disconnect()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun completeActiveRequest(requestId: String) {
+        val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null) ?: return
+        if (io.isShutdown) return
+        io.execute { try { gatewayAck(token, requestId, "completed") } catch (_: Exception) {} }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -152,12 +196,14 @@ class MainActivity : AppCompatActivity() {
         if (intent.action != ACTION_APPROVE_CALL) return
         val phone = intent.getStringExtra(EXTRA_PHONE).orEmpty()
         numberView.setText(phone)
+        val commandId = intent.getStringExtra(EXTRA_COMMAND_ID)
+        activeRequestId = commandId
+        sawOffHook = false
         val result = executeApprovedCommand("call", phone)
         status.text = result.message
-        val commandId = intent.getStringExtra(EXTRA_COMMAND_ID)
         val token = getSharedPreferences("gateway", MODE_PRIVATE).getString("device_token", null)
         if (!commandId.isNullOrBlank() && !token.isNullOrBlank()) io.execute {
-            try { gatewayAck(token, commandId, if (result.success) "completed" else "failed") } catch (_: Exception) {}
+            try { gatewayAck(token, commandId, if (result.success) "claimed" else "failed") } catch (_: Exception) {}
         }
         intent.action = null
     }
