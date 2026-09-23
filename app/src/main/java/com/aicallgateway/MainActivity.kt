@@ -86,7 +86,13 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.approveSession).setOnClickListener {
             sessionApproved = !sessionApproved
-            sessionState.text = if (sessionApproved) "Calling session: APPROVED" else "Calling session: not approved"
+            if (sessionApproved) {
+                androidx.core.content.ContextCompat.startForegroundService(this, Intent(this, GatewayService::class.java))
+                polling = false
+            } else {
+                stopService(Intent(this, GatewayService::class.java))
+            }
+            sessionState.text = if (sessionApproved) "Calling session: APPROVED — background gateway active" else "Calling session: not approved"
             findViewById<Button>(R.id.approveSession).text = if (sessionApproved) "End Calling Session" else "Approve Calling Session"
         }
 
@@ -108,7 +114,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        sessionApproved = false
+        // The foreground service owns an approved session across Activity/screen lifecycle.
         polling = false
         pollingIo.shutdownNow()
         outboundIo.shutdownNow()
