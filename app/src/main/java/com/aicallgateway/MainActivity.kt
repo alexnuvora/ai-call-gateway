@@ -79,6 +79,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    // Entry point used by an approved command consumer. It deliberately delegates
+    // to the same verified telephony implementation as the on-screen button.
+    private fun executeApprovedCommand(action: String, phoneNumber: String?): CallResult {
+        return when (action.lowercase()) {
+            "call" -> {
+                if (phoneNumber.isNullOrBlank()) CallResult(false, "Phone number required")
+                else placeSimCall(phoneNumber)
+            }
+            "hangup" -> endSimCall()
+            else -> CallResult(false, "Unsupported command")
+        }
+    }
+
     private fun validNumber(n: String): Boolean {
         if (!n.matches(Regex("^\\+?[0-9]{7,15}$"))) return false
         val digits = n.filter(Char::isDigit)
