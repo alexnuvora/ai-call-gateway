@@ -23,21 +23,50 @@ class GatewayService : Service() {
     @Volatile private var activeRequestId:String?=null
     @Volatile private var sawOffHook=false
     @Volatile private var lastCallState=TelephonyManager.CALL_STATE_IDLE
+    @Volatile private var requestStartedAtMs=0L
     private lateinit var telephony:TelephonyManager
 
     @Suppress("DEPRECATION")
     private val phoneListener=object:PhoneStateListener(){
         override fun onCallStateChanged(state:Int,phoneNumber:String?){
-            lastCallState=state
-            val name=when(state){TelephonyManager.CALL_STATE_RINGING->"ringing";TelephonyManager.CALL_STATE_OFFHOOK->"active";else->"idle"}
-            if(state==TelephonyManager.CALL_STATE_OFFHOOK)sawOffHook=true
-            activeRequestId?.let{id->
-                sendEvent("call_state",name,id)
-                if(state==TelephonyManager.CALL_STATE_IDLE&&sawOffHook){
-                    completeRequest(id); activeRequestId=null; sawOffHook=false
-                }
-            }
+            handleCallState(state)
         }
+    }
+
+    private fun handleCallState(state:Int){
+        val previous=lastCallState
+        lastCallState=state
+        val name=when(state){TelephonyManager.CALL_STATE_RINGING->"ringing";TelephonyManager.CALL_STATE_OFFHOOK->"active";else->"idle"}
+        if(state==TelephonyManager.CALL_STATE_OFFHOOK)sawOffHook=true
+        val id=activeRequestId?:return
+        if(state!=previous)sendEvent("call_state",name,id)
+        if(state==TelephonyManager.CALL_STATE_IDLE&&sawOffHook){
+            sendEvent("call_ended","idle",id)
+            completeRequest(id)
+            activeRequestId=null
+            sawOffHook=false
+            requestStartedAtMs=0L
+        }
+    }
+
+    private fun reconcileCallState(){
+        if(ActivityCompat.checkSelfPermission(this,Manifest.permission.READ_PHONE_STATE)!=PackageManager.PERMISSION_GRANTED)return
+        try{
+            @Suppress("DEPRECATION") val state=telephony.callState
+            if(state!=lastCallState)handleCallState(state)
+        }catch(_:Exception){}
+    }
+
+    private fun enforcePlacementWatchdog(){
+        val id=activeRequestId?:return
+        if(sawOffHook||requestStartedAtMs==0L)return
+        if(SystemClock.elapsedRealtime()-requestStartedAtMs<90000L)return
+        try{endSimCall()}catch(_:Exception){}
+        sendEvent("call_timeout","idle",id)
+        failRequest(id,"Call did not reach active state within 90 seconds")
+        activeRequestId=null
+        sawOffHook=false
+        requestStartedAtMs=0L
     }
 
     override fun onCreate(){
@@ -67,13 +96,15 @@ class GatewayService : Service() {
                 }else if(command!=null&&command.optString("action")=="call"){
                     val id=command.optString("id");val phone=command.optString("phone_number")
                     if(validNumber(phone)&&activeRequestId==null){
-                        activeRequestId=id;sawOffHook=lastCallState==TelephonyManager.CALL_STATE_OFFHOOK
+                        activeRequestId=id;sawOffHook=lastCallState==TelephonyManager.CALL_STATE_OFFHOOK;requestStartedAtMs=SystemClock.elapsedRealtime()
                         val result=placeSimCall(phone)
-                        if(!result.success){activeRequestId=null;sawOffHook=false}
+                        if(!result.success){activeRequestId=null;sawOffHook=false;requestStartedAtMs=0L}
                         gatewayAck(token,id,if(result.success)"claimed" else "failed","request",if(result.success)null else result.message)
                         if(result.success)sendEvent("call_requested",if(sawOffHook)"active" else "dialing",id)
                     }
                 }
+                reconcileCallState()
+                enforcePlacementWatchdog()
                 Thread.sleep(3000)
             }catch(_:InterruptedException){Thread.currentThread().interrupt();break}
             catch(_:Exception){try{Thread.sleep(5000)}catch(_:InterruptedException){break}}
@@ -94,6 +125,10 @@ class GatewayService : Service() {
     private fun completeRequest(id:String){
         val token=getSharedPreferences("gateway",MODE_PRIVATE).getString("device_token",null)?:return
         if(!outboundIo.isShutdown)outboundIo.execute{try{gatewayAck(token,id,"completed")}catch(_:Exception){}}
+    }
+    private fun failRequest(id:String,error:String){
+        val token=getSharedPreferences("gateway",MODE_PRIVATE).getString("device_token",null)?:return
+        if(!outboundIo.isShutdown)outboundIo.execute{try{gatewayAck(token,id,"failed","request",error)}catch(_:Exception){}}
     }
     private fun post(token:String,json:JSONObject){
         val c=URL(GATEWAY_URL).openConnection() as HttpURLConnection;c.requestMethod="POST";c.doOutput=true;c.connectTimeout=10000;c.readTimeout=10000
